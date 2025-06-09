@@ -2,6 +2,8 @@ import os
 import json
 import firebase_admin
 from firebase_admin import credentials, messaging
+import logging
+logger = logging.getLogger(__name__)
 
 class FcmService:
     """
@@ -11,15 +13,18 @@ class FcmService:
     """
     def __init__(self):
         # 서비스 계정 키 JSON 경로 가져오기
-        cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-        if cred_path and os.path.exists(cred_path):
-            cred = credentials.Certificate(cred_path)
+        cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")        # Firebase 앱이 이미 초기화되었는지 확인
+        if not firebase_admin._apps:
+            try:
+                # Firebase Admin SDK 초기화
+                cred = firebase_admin.credentials.Certificate(cred_path)
+                firebase_admin.initialize_app(cred)
+                logger.info("Firebase Admin SDK initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize Firebase Admin SDK: {e}")
+                raise
         else:
-            # env var가 없으면 Application Default Credentials 사용
-            cred = credentials.ApplicationDefault()
-
-        # Firebase Admin SDK 초기화
-        firebase_admin.initialize_app(cred)
+            logger.debug("Firebase Admin SDK already initialized")
 
     def _serialize_message(self, message: messaging.Message) -> dict:
         """
