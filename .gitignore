@@ -1,0 +1,19 @@
+# 기존 설정
+alarm-mail-app-*.json
+*.json
+
+# 추가: FCM 및 기타 보안 관련 JSON 파일
+fcm-credentials.json
+secrets.json
+credentials.json
+config.json
+keys.json
+auth.json
+firebase.json
+google-services.json
+GoogleService-Info.json
+
+# 환경 변수 파일
+.env
+.env.local
+.env.*.local

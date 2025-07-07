@@ -1,51 +1,46 @@
+import json
+import logging
+import requests
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urljoin
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from google.auth.transport.requests import Request
 from googleapiclient.errors import HttpError
-import requests
+from sqlalchemy.orm import Session
+from infra.db import SessionLocal
+from models.gmail_users import GmailToken
+from models.outlook_users import OutlookToken
+
+logger = logging.getLogger(__name__)
 
 class GmailAuth:
     def __init__(self):
         self.SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
-        # Flutter에서 사용하는 native 앱용 public client ID
-        self.CLIENT_ID = '896564723347-ooift0gpd2idsgmllnoll75gjju646ai.apps.googleusercontent.com'
-        # public client에서는 secret 없음
-        self.CLIENT_SECRET = None
-        self.token_store = {}  # { fcm_token: {'access_token': ..., 'refresh_token': ...} }
+        with open('credentials.json') as f:
+            creds_data = json.load(f)
+            self.CLIENT_ID = creds_data['web']['client_id']
+            self.CLIENT_SECRET = creds_data['web']['client_secret']
+            self.TOKEN_URI = creds_data['web']['token_uri']
 
-    def watch(self, fcm_token: str, access_token: str, refresh_token: str):
-        # 토큰 저장
-        self.token_store[fcm_token] = {
-            'access_token': access_token,
-            'refresh_token': refresh_token
-        }
-        creds = self._get_credentials(fcm_token)
-        service = build('gmail', 'v1', credentials=creds)
-        body = {'labelIds': ['INBOX'], 'topicName': 'projects/alarm-mail-app/topics/gmail-notifications'}
-        try:
-            return service.users().watch(userId='me', body=body).execute()
-        except HttpError as e:
-            print(f"Watch 요청 실패: {e}")
-            raise
-
-    def _get_credentials(self, fcm_token: str) -> Credentials:
-        tokens = self.token_store[fcm_token]
+    def _get_credentials(self, token):
         creds = Credentials(
-            token=tokens['access_token'],
-            refresh_token=tokens['refresh_token'],
+            token=token.access_token,
+            refresh_token=token.refresh_token,
             token_uri='https://oauth2.googleapis.com/token',
             client_id=self.CLIENT_ID,
+            client_secret=self.CLIENT_SECRET,
             scopes=self.SCOPES
         )
-        # expired 시 manual refresh
         if creds.expired and creds.refresh_token:
-            new_token = self._manual_refresh(tokens['refresh_token'])
-            tokens['access_token'] = new_token
+            new_token = self._manual_refresh(token.refresh_token)
+            token.access_token = new_token
+            self._save_token(token)
             creds = Credentials(
                 token=new_token,
-                refresh_token=creds.refresh_token,
-                token_uri=creds.token_uri,
+                refresh_token=token.refresh_token,
+                token_uri='https://oauth2.googleapis.com/token',
                 client_id=self.CLIENT_ID,
+                client_secret=self.CLIENT_SECRET,
                 scopes=self.SCOPES
             )
         return creds
@@ -54,24 +49,100 @@ class GmailAuth:
         payload = {
             'grant_type': 'refresh_token',
             'refresh_token': refresh_token,
-            'client_id': self.CLIENT_ID
+            'client_id': self.CLIENT_ID,
+            'client_secret': self.CLIENT_SECRET
         }
         r = requests.post('https://oauth2.googleapis.com/token', data=payload)
         r.raise_for_status()
         return r.json()['access_token']
 
-    def get_valid_token(self, fcm_token):
-        creds = self._get_credentials(fcm_token)
-        return creds.token
+    def _save_token(self, token):
+        with SessionLocal() as db:
+            db.merge(token)
+            db.commit()
+
+    def watch(self, fcm_token, access_token, refresh_token, email_address):
+        db = SessionLocal()
+        try:
+            logger.info(f"Processing Gmail token for fcm_token: {fcm_token}, email_address: {email_address}")
+
+            # Gmail API 클라이언트 생성
+            creds = Credentials(
+                token=access_token,
+                refresh_token=refresh_token,
+                token_uri=self.TOKEN_URI,
+                client_id=self.CLIENT_ID,
+                client_secret=self.CLIENT_SECRET,
+                scopes=self.SCOPES
+            )
+            service = build('gmail', 'v1', credentials=creds)
+            request = {
+                'labelIds': ['INBOX'],
+                'topicName': 'projects/mail-push-app-815d4/topics/gmail-notifications'
+            }
+            watch_response = service.users().watch(userId='me', body=request).execute()
+            logger.info(f"Set Pub/Sub watch for fcm_token: {fcm_token}, response: {watch_response}")
+
+            # fcm_token으로 기존 토큰 확인
+            existing_token = db.query(GmailToken).filter_by(fcm_token=fcm_token).first()
+
+            if existing_token:
+                # 동일 fcm_token이면 업데이트
+                logger.info(f"Updating existing token for fcm_token: {fcm_token}, email_address: {email_address}")
+                existing_token.access_token = access_token
+                existing_token.refresh_token = refresh_token
+                existing_token.email_address = email_address
+                existing_token.last_history_id = watch_response.get('historyId')
+                existing_token.updated_at = datetime.utcnow()
+            else:
+                # 새 fcm_token이면 새 레코드 생성
+                logger.info(f"Creating new token for fcm_token: {fcm_token}, email_address: {email_address}")
+                new_token = GmailToken(
+                    fcm_token=fcm_token,
+                    access_token=access_token,
+                    refresh_token=refresh_token,
+                    email_address=email_address,
+                    last_history_id=watch_response.get('historyId'),
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow()
+                )
+                db.add(new_token)
+
+            db.commit()
+            db.refresh(existing_token if existing_token else new_token)
+            logger.info(f"Token committed successfully for fcm_token: {fcm_token}")
+            return existing_token if existing_token else new_token
+        except HttpError as e:
+            db.rollback()
+            logger.error(f"Gmail API error: {str(e)}")
+            raise Exception(f"Gmail token update failed: {str(e)}")
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Gmail token update failed: {str(e)}")
+            raise Exception(f"Gmail token update failed: {str(e)}")
+        finally:
+            db.close()
+
+    def get_valid_token(self, fcm_token: str):
+        with SessionLocal() as db:
+            token = db.query(GmailToken).filter_by(fcm_token=fcm_token).first()
+            if not token:
+                raise RuntimeError("No Gmail token found")
+            creds = self._get_credentials(token)
+            return creds.token
 
     def get_message_labels(self, fcm_token, message_id):
         try:
-            creds = self._get_credentials(fcm_token)
-            service = build('gmail', 'v1', credentials=creds)
-            message = service.users().messages().get(userId='me', id=message_id).execute()
-            labels = message.get('labelIds', [])
-            print(f"메시지 {message_id}의 라벨: {labels}")
-            return labels
+            with SessionLocal() as db:
+                token = db.query(GmailToken).filter_by(fcm_token=fcm_token).first()
+                if not token:
+                    raise RuntimeError("No Gmail token found")
+                creds = self._get_credentials(token)
+                service = build('gmail', 'v1', credentials=creds)
+                message = service.users().messages().get(userId='me', id=message_id).execute()
+                labels = message.get('labelIds', [])
+                logger.info(f"메시지 {message_id}의 라벨: {labels}")
+                return labels
         except Exception as e:
-            print(f"메시지 라벨 조회 오류: {e}")
+            logger.error(f"메시지 라벨 조회 오류: {e}")
             return []

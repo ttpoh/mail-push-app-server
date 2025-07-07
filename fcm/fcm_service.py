@@ -1,74 +1,7 @@
-import os
+from firebase_admin import messaging
 import json
-import firebase_admin
-from firebase_admin import credentials, messaging
-import logging
-logger = logging.getLogger(__name__)
 
 class FcmService:
-    """
-    Firebase Cloud Messaging 서비스: FCM 푸시 알림을 전송합니다.
-    - 환경변수 GOOGLE_APPLICATION_CREDENTIALS로 서비스 계정 JSON 경로를 설정
-    - '긴급' 키워드 -> siren.mp3 (CriticalSound), '미팅' 키워드 -> default sound
-    """
-    def __init__(self):
-        # 서비스 계정 키 JSON 경로 가져오기
-        cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")        # Firebase 앱이 이미 초기화되었는지 확인
-        if not firebase_admin._apps:
-            try:
-                # Firebase Admin SDK 초기화
-                cred = firebase_admin.credentials.Certificate(cred_path)
-                firebase_admin.initialize_app(cred)
-                logger.info("Firebase Admin SDK initialized successfully")
-            except Exception as e:
-                logger.error(f"Failed to initialize Firebase Admin SDK: {e}")
-                raise
-        else:
-            logger.debug("Firebase Admin SDK already initialized")
-
-    def _serialize_message(self, message: messaging.Message) -> dict:
-        """
-        messaging.Message 객체를 JSON 직렬화 가능한 딕셔너리로 변환합니다.
-        """
-        serialized = {
-            'notification': {
-                'title': message.notification.title if message.notification else None,
-                'body': message.notification.body if message.notification else None,
-            } if message.notification else None,
-            'data': message.data,
-            'token': message.token,
-        }
-        # APNS 설정이 있는 경우 추가 직렬화
-        if message.apns:
-            aps = message.apns.payload.aps
-            sound_repr = None
-            if aps.sound is not None:
-                # CriticalSound 객체인 경우
-                if isinstance(aps.sound, messaging.CriticalSound):
-                    sound_repr = {
-                        'critical': aps.sound.critical,
-                        'name': aps.sound.name,
-                        'volume': aps.sound.volume,
-                    }
-                else:
-                    # 문자열(sound name)인 경우
-                    sound_repr = aps.sound
-
-            serialized['apns'] = {
-                'headers': message.apns.headers,
-                'payload': {
-                    'aps': {
-                        'alert': {
-                            'title': aps.alert.title if aps.alert else None,
-                            'body': aps.alert.body if aps.alert else None,
-                        } if aps.alert else None,
-                        'sound': sound_repr,
-                        'content-available': aps.content_available,
-                    }
-                }
-            }
-        return serialized
-
     def send_push(self, fcm_token: str, title: str, body: str, data: dict = None) -> str:
         """
         FCM 푸시 알림을 전송합니다.
@@ -85,7 +18,7 @@ class FcmService:
             return None
 
         # 페이로드 데이터 준비
-        payload_data = data.copy() if data else {}
+        payload_data = {key: str(value) for key, value in (data.items() if data else {})}  # 모든 값을 문자열로 변환
         mail_data = {'subject': title, 'body': body}
         payload_data['mailData'] = json.dumps(mail_data, ensure_ascii=False)
         payload_data['isCritical'] = 'true' if critical_flag else 'false'
@@ -131,5 +64,36 @@ class FcmService:
             print(f"푸시 전송 성공: {response}")
             return response
         except Exception as e:
-            print(f"푸시 전송 실패: {e}")
+            print(f"푸시 전송 실패: {str(e)}")
             raise
+
+    def _serialize_message(self, message):
+        """
+        메시지를 직렬화 가능한 딕셔너리로 변환 (디버깅용)
+        """
+        return {
+            'notification': {
+                'title': message.notification.title,
+                'body': message.notification.body
+            } if message.notification else None,
+            'data': message.data,
+            'token': message.token,
+            'apns': {
+                'headers': message.apns.headers,
+                'payload': {
+                    'aps': {
+                        'alert': {
+                            'title': message.apns.payload.aps.alert.title,
+                            'body': message.apns.payload.aps.alert.body
+                        },
+                        'sound': {
+                            'critical': message.apns.payload.aps.sound.critical,
+                            'name': message.apns.payload.aps.sound.name,
+                            'volume': message.apns.payload.aps.sound.volume
+                        } if isinstance(message.apns.payload.aps.sound, messaging.CriticalSound) else message.apns.payload.aps.sound,
+                        'content-available': message.apns.payload.aps.content_available
+                    },
+                    'custom_data': message.apns.payload.custom_data
+                }
+            } if message.apns else None
+        }
