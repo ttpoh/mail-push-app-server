@@ -17,3 +17,5 @@ GoogleService-Info.json
 .env
 .env.local
 .env.*.localfcm-credentials.json
+fcm-credentials.json
+fcm-credentials.json
