@@ -6,6 +6,8 @@ from auth.gmail_auth import GmailAuth
 from auth.outlook_auth import OutlookAuth
 from models.outlook_users import OutlookToken
 from models.gmail_users import GmailToken
+from models.icloud_users import ICloudToken
+
 import requests
 from infra.db import SessionLocal
 import logging
@@ -118,6 +120,84 @@ def update_tokens():
 
             return jsonify({'status': 'outlook_tokens_updated', 'email_address': email_address}), 200
 
+        
+        
+        elif service == 'icloud':
+            try:
+                from jose import jwt
+
+                # Apple의 공개 키 가져오기
+                APPLE_KEYS_URL = 'https://appleid.apple.com/auth/keys'
+                apple_keys = requests.get(APPLE_KEYS_URL).json()['keys']
+
+                # 디코드 및 서명 검증
+                identity_token = access_token
+                header = jwt.get_unverified_header(identity_token)
+
+                key = next((k for k in apple_keys if k['kid'] == header['kid']), None)
+
+                if key is None:
+                    return jsonify({'error': 'Apple public key not found'}), 400
+
+                public_key = {
+                    'kty': key['kty'],
+                    'kid': key['kid'],
+                    'use': key['use'],
+                    'n': key['n'],
+                    'e': key['e'],
+                }
+
+                decoded = jwt.decode(
+                    identity_token,
+                    public_key,
+                    algorithms=key['alg'],
+                    audience='com.secure.mailPushApp',  # ⚠️ 실제 서비스 ID로 대체
+                    issuer='https://appleid.apple.com'
+                )
+
+                sub = decoded.get('sub')
+                email_address = decoded.get('email') or f"{sub}@icloud.apple"
+
+                with SessionLocal() as db:
+                    existing = db.query(ICloudToken).filter_by(sub=sub).first()
+
+                    if existing:
+                        logger.info(f"Updating iCloudToken for sub: {sub}")
+                        existing.email_address = email_address
+                        existing.fcm_token = fcm_token
+                        existing.access_token = access_token
+                        existing.updated_at = datetime.utcnow()
+                    else:
+                        logger.info(f"Inserting new iCloudToken for sub: {sub}")
+                        new_token = ICloudToken(
+                            sub=sub,
+                            email_address=email_address,
+                            fcm_token=fcm_token,
+                            access_token=access_token,
+                            created_at=datetime.utcnow(),
+                            updated_at=datetime.utcnow()
+                        )
+                        db.add(new_token)
+
+                    db.commit()
+
+
+                logger.info(f"✅ Apple 로그인 이메일: {email_address}")
+
+                return jsonify({
+                    'status': 'icloud_identity_verified',
+                    'email_address': email_address
+                }), 200
+
+            except jwt.ExpiredSignatureError:
+                return jsonify({'error': 'Apple identity token expired'}), 401
+            except jwt.JWTError as e:
+                logger.error(f"Apple token decode error: {e}")
+                return jsonify({'error': 'Invalid Apple identity token'}), 400
+            except Exception as e:
+                logger.error(f"Unhandled Apple login error: {e}", exc_info=True)
+                return jsonify({'error': 'Internal server error'}), 500
+            
         else:
             return jsonify({'error': 'Unsupported service'}), 400
 

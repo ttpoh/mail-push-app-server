@@ -4,6 +4,7 @@ from models.gmail_users import GmailToken
 from models.gmail_mail import GmailEmail
 from models.outlook_users import OutlookToken
 from models.outlook_mail import OutlookEmail
+from models.icloud_users import ICloudToken
 
 def initialize_database():
     print("Checking and creating tables if needed...")
@@ -12,6 +13,12 @@ def initialize_database():
     existing_tables = inspector.get_table_names()
 
     with engine.connect() as conn:
+        if 'icloud_tokens' not in existing_tables:
+            print("Creating icloud_tokens table...")
+            ICloudToken.__table__.create(bind=conn, checkfirst=True)
+            print("icloud_tokens table created.")
+        else:
+            print("gmail_tokens table already exists.")
         if 'gmail_users' not in existing_tables:
             print("Creating gmail_users table...")
             GmailToken.__table__.create(bind=conn, checkfirst=True)
