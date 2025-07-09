@@ -31,7 +31,7 @@ def logout_gmail():
                 project_id = "mail-push-app-815d4"
                 subscription_path = f"projects/{project_id}/subscriptions/{subscription_id}"
                 credentials = service_account.Credentials.from_service_account_file(
-                    "/home/ubuntu/mail-push-server/mail-push-app-815d4-888b7cbde2f4.json"
+                    "/home/ubuntu/mail-push-server-backup/mail-push-app-815d4-888b7cbde2f4.json"
                 )
                 subscriber = pubsub_v1.SubscriberClient(credentials=credentials)
 

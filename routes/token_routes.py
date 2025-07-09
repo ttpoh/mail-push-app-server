@@ -101,7 +101,7 @@ def update_tokens():
                     existing.access_token = access_token
                     existing.refresh_token = refresh_token
                     existing.email_address = email_address
-                    existing.expires_at = datetime.utcnow() + timedelta(hours=1)
+                    existing.access_token_exp = datetime.utcnow() + timedelta(hours=1)
                 else:
                     # 존재하지 않으면 새로운 레코드 추가
                     logger.info(f"Inserting new token for email: {email_address}, client_state: {client_state}")
@@ -112,7 +112,8 @@ def update_tokens():
                         email_address=email_address,
                         client_state=client_state,
                         subscription_id=None,  # 👈 명시적으로 넣기
-                        expires_at=datetime.utcnow() + timedelta(hours=1)
+                        subscription_exp=None,
+                        access_token_exp=datetime.utcnow() + timedelta(hours=1)
                     )
                     db.add(new_token)
 

@@ -20,7 +20,7 @@ def create_gmail_subscription():
     topic_id = "gmail-notifications"
     subscription_id = "gmail-subscription"
     push_endpoint = "https://mail-push.xtect.net/pubsub_endpoint"
-    service_account_file = "/home/ubuntu/mail-push-server/mail-push-app-815d4-888b7cbde2f4.json"
+    service_account_file = "/home/ubuntu/mail-push-server-backup/mail-push-app-815d4-888b7cbde2f4.json"
 
     # 명시적으로 서비스 계정 credential 로드
     credentials = service_account.Credentials.from_service_account_file(service_account_file)
@@ -177,7 +177,7 @@ def create_subscription():
                 client_state=client_state,
                 subscription_id=subscription_id or None,  # 명시적 설정
                 # resource=resource,
-                expires_at=datetime.utcnow() + timedelta(hours=1),
+                access_token_exp=datetime.utcnow() + timedelta(hours=1),
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow()
             )

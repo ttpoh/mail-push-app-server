@@ -6,6 +6,7 @@ It optionally opens a browser window to guide a human user to manually login.
 After obtaining an auth code, the web server will automatically shut down.
 """
 import logging
+import os
 import socket
 import sys
 from string import Template
@@ -15,10 +16,12 @@ import time
 try:  # Python 3
     from http.server import HTTPServer, BaseHTTPRequestHandler
     from urllib.parse import urlparse, parse_qs, urlencode
+    from html import escape
 except ImportError:  # Fall back to Python 2
     from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
     from urlparse import urlparse, parse_qs
     from urllib import urlencode
+    from cgi import escape
 
 
 logger = logging.getLogger(__name__)
@@ -34,6 +37,20 @@ def obtain_auth_code(listen_port, auth_uri=None):  # Historically only used in t
                 <hr><a href='$abort_uri'>Abort</a>
                 </body></html>""",
             ).get("code")
+
+
+def _is_inside_docker():
+    try:
+        with open("/proc/1/cgroup") as f:  # https://stackoverflow.com/a/20012536/728675
+            # Search keyword "/proc/pid/cgroup" in this link for the file format
+            # https://man7.org/linux/man-pages/man7/cgroups.7.html
+            for line in f.readlines():
+                cgroup_path = line.split(":", 2)[2].strip()
+                if cgroup_path.strip() != "/":
+                    return True
+    except IOError:
+        pass  # We are probably not running on Linux
+    return os.path.exists("/.dockerenv")  # Docker on Mac will run this line
 
 
 def is_wsl():
@@ -77,31 +94,54 @@ def _qs2kv(qs):
         for k, v in qs.items()}
 
 
+def _is_html(text):
+    return text.startswith("<")  # Good enough for our purpose
+
+
+def _escape(key_value_pairs):
+    return {k: escape(v) for k, v in key_value_pairs.items()}
+
+
+def _printify(text):
+    # If an https request is sent to an http server, the text needs to be repr-ed
+    return repr(text) if isinstance(text, str) and not text.isprintable() else text
+
+
 class _AuthCodeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         # For flexibility, we choose to not check self.path matching redirect_uri
         #assert self.path.startswith('/THE_PATH_REGISTERED_BY_THE_APP')
         qs = parse_qs(urlparse(self.path).query)
         if qs.get('code') or qs.get("error"):  # So, it is an auth response
-            self.server.auth_response = _qs2kv(qs)
-            logger.debug("Got auth response: %s", self.server.auth_response)
-            template = (self.server.success_template
-                if "code" in qs else self.server.error_template)
-            self._send_full_response(
-                template.safe_substitute(**self.server.auth_response))
-            # NOTE: Don't do self.server.shutdown() here. It'll halt the server.
+            auth_response = _qs2kv(qs)
+            logger.debug("Got auth response: %s", auth_response)
+            if self.server.auth_state and self.server.auth_state != auth_response.get("state"):
+                # OAuth2 successful and error responses contain state when it was used
+                # https://www.rfc-editor.org/rfc/rfc6749#section-4.2.2.1
+                self._send_full_response("State mismatch")  # Possibly an attack
+            else:
+                template = (self.server.success_template
+                    if "code" in qs else self.server.error_template)
+                if _is_html(template.template):
+                    safe_data = _escape(auth_response)  # Foiling an XSS attack
+                else:
+                    safe_data = auth_response
+                self._send_full_response(template.safe_substitute(**safe_data))
+                self.server.auth_response = auth_response  # Set it now, after the response is likely sent
         else:
             self._send_full_response(self.server.welcome_page)
+        # NOTE: Don't do self.server.shutdown() here. It'll halt the server.
 
     def _send_full_response(self, body, is_ok=True):
         self.send_response(200 if is_ok else 400)
-        content_type = 'text/html' if body.startswith('<') else 'text/plain'
+        content_type = 'text/html' if _is_html(body) else 'text/plain'
         self.send_header('Content-type', content_type)
         self.end_headers()
         self.wfile.write(body.encode("utf-8"))
 
     def log_message(self, format, *args):
-        logger.debug(format, *args)  # To override the default log-to-stderr behavior
+        # To override the default log-to-stderr behavior
+        logger.debug(format, *map(_printify, args))
 
 
 class _AuthCodeHttpServer(HTTPServer, object):
@@ -146,7 +186,7 @@ class AuthCodeReceiver(object):
             then the receiver would call that lambda function after
             waiting the response for 10 seconds.
         """
-        address = "127.0.0.1"  # Hardcode, for now, Not sure what to expose, yet.
+        address = "0.0.0.0" if _is_inside_docker() else "127.0.0.1"  # Hardcode
             # Per RFC 8252 (https://tools.ietf.org/html/rfc8252#section-8.3):
             #   * Clients should listen on the loopback network interface only.
             #     (It is not recommended to use "" shortcut to bind all addr.)
@@ -264,13 +304,15 @@ class AuthCodeReceiver(object):
                     logger.warning(
                         "Found no browser in current environment. "
                         "If this program is being run inside a container "
-                        "which has access to host network "
+                        "which either (1) has access to host network "
                         "(i.e. started by `docker run --net=host -it ...`), "
+                        "or (2) published port {port} to host network "
+                        "(i.e. started by `docker run -p 127.0.0.1:{port}:{port} -it ...`), "
                         "you can use browser on host to visit the following link. "
                         "Otherwise, this auth attempt would either timeout "
                         "(current timeout setting is {timeout}) "
                         "or be aborted by CTRL+C. Auth URI: {auth_uri}".format(
-                            auth_uri=_uri, timeout=timeout))
+                            auth_uri=_uri, timeout=timeout, port=self.get_port()))
                 else:  # Then it is the auth_uri_callback()'s job to inform the user
                     auth_uri_callback(_uri)
 
@@ -281,16 +323,14 @@ class AuthCodeReceiver(object):
 
         self._server.timeout = timeout  # Otherwise its handle_timeout() won't work
         self._server.auth_response = {}  # Shared with _AuthCodeHandler
+        self._server.auth_state = state  # So handler will check it before sending response
         while not self._closing:  # Otherwise, the handle_request() attempt
                                   # would yield noisy ValueError trace
             # Derived from
             # https://docs.python.org/2/library/basehttpserver.html#more-examples
             self._server.handle_request()
             if self._server.auth_response:
-                if state and state != self._server.auth_response.get("state"):
-                    logger.debug("State mismatch. Ignoring this noise.")
-                else:
-                    break
+                break
         result.update(self._server.auth_response)  # Return via writable result param
 
     def close(self):
@@ -318,6 +358,7 @@ if __name__ == '__main__':
         default="https://login.microsoftonline.com/common/oauth2/v2.0/authorize")
     p.add_argument('client_id', help="The client_id of your application")
     p.add_argument('--port', type=int, default=0, help="The port in redirect_uri")
+    p.add_argument('--timeout', type=int, default=60, help="Timeout value, in second")
     p.add_argument('--host', default="127.0.0.1", help="The host of redirect_uri")
     p.add_argument('--scope', default=None, help="The scope list")
     args = parser.parse_args()
@@ -331,8 +372,8 @@ if __name__ == '__main__':
             auth_uri=flow["auth_uri"],
             welcome_template=
                 "<a href='$auth_uri'>Sign In</a>, or <a href='$abort_uri'>Abort</a",
-            error_template="Oh no. $error",
+            error_template="<html>Oh no. $error</html>",
             success_template="Oh yeah. Got $code",
-            timeout=60,
+            timeout=args.timeout,
             state=flow["state"],  # Optional
             ), indent=4))

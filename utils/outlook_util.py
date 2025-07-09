@@ -1,4 +1,3 @@
-# ✅ get_outlook_email_details 함수 (token_store 제거 및 DB 저장 포함)
 import requests
 from bs4 import BeautifulSoup
 import logging
@@ -6,8 +5,9 @@ from typing import Optional, Tuple
 from models.outlook_mail import OutlookEmail
 from models.outlook_users import OutlookToken
 from infra.db import SessionLocal
-from sqlalchemy.orm.exc import NoResultFound
 from datetime import datetime
+import re
+from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
 
@@ -15,82 +15,62 @@ def get_outlook_email_details(
     client_state: str,
     message_id: str,
     user_id: str,
-    processed_message_ids: set,
+    processed_message_ids: set,  # 사용되지 않음, 호환성을 위해 유지
     outlook_auth,
     redis_client=None,
     retries: int = 3
 ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-
-    # 중복 메시지 확인
+    # Redis를 사용한 중복 확인
     if redis_client:
         redis_key = f"outlook_msg:{message_id}"
         if redis_client.get(redis_key):
-            logger.info(f"[Duplicate] Message {message_id} already processed (from Redis)")
+            logger.info(f"[중복] 메시지 {message_id} 이미 처리됨 (Redis에서)")
             return None, None, None, None
-        else:
-            redis_client.setex(redis_key, 3600, "1")  # 중복 방지를 위해 1시간 TTL 설정
-    else:
-        if message_id in processed_message_ids:
-            logger.info(f"[Duplicate] Message {message_id} already processed (from memory)")
-            return None, None, None, None
-        processed_message_ids.add(message_id)
+        redis_client.setex(redis_key, 3600, "1")  # 1시간 TTL
 
     with SessionLocal() as db:
         try:
             token_record = db.query(OutlookToken).filter_by(client_state=client_state).one()
             fcm_token = token_record.fcm_token
-            user_id = token_record.email_address
-        except NoResultFound:
-            logger.error(f"No OutlookToken found for client_state: {client_state}")
+            email_address = token_record.email_address or user_id
+        except Exception as e:
+            logger.error(f"client_state에 대한 OutlookToken 없음: {client_state}: {e}")
             return None, None, None, None
 
-    for attempt in range(retries):
-        try:
-            token = outlook_auth.get_valid_token(fcm_token)
-            if not token:
-                logger.error(f"No valid token for fcm_token: {fcm_token}")
-                return None, None, None, None
-
-            url = f'https://graph.microsoft.com/v1.0/users/{user_id}/messages/{message_id}'
-            headers = {'Authorization': f'Bearer {token}'}
-            logger.info(f"Fetching email details for message_id: {message_id}, user_id: {user_id}, attempt: {attempt + 1}")
-            resp = requests.get(url, headers=headers)
-            resp.raise_for_status()
-            msg = resp.json()
-            logger.info(f"outlook msg {msg}")
-
-            subject = msg.get('subject', 'No Subject')
-            email_address = msg.get('toRecipients', [{}])[0].get('emailAddress', {}).get('address', 'Unknown toRecipients')
-            sender = msg.get('from', {}).get('emailAddress', {}).get('address', 'Unknown Sender')
-            content = msg.get('body', {}).get('content', '')
-            content_type = msg.get('body', {}).get('contentType', 'text')
-
+        for attempt in range(retries):
             try:
-                if content_type == 'html':
-                    body = BeautifulSoup(content, 'html.parser').get_text(separator=' ', strip=True)
-                else:
+                token = outlook_auth.get_valid_token(fcm_token)
+                if not token:
+                    logger.error(f"fcm_token에 대한 유효한 토큰 없음: {fcm_token}")
+                    return None, None, None, None
+
+                url = f'https://graph.microsoft.com/v1.0/users/{email_address}/messages/{message_id}'
+                headers = {'Authorization': f'Bearer {token}'}
+                logger.info(f"메시지 세부 정보 가져오기: message_id={message_id}, email_address={email_address}, 시도: {attempt + 1}")
+                resp = requests.get(url, headers=headers, timeout=10)
+                resp.raise_for_status()
+                msg = resp.json()
+
+                odata_ctx = msg.get('@odata.context', '')
+                m = re.search(r"users\('(.+?)'\)", odata_ctx)
+                user_email = unquote(m.group(1)) if m else email_address
+
+                subject = msg.get('subject', '제목 없음')
+                sender = msg.get('from', {}).get('emailAddress', {}).get('address', '알 수 없는 발신자')
+                content = msg.get('body', {}).get('content', '')
+                content_type = msg.get('body', {}).get('contentType', 'text')
+
+                try:
+                    body = BeautifulSoup(content, 'html.parser').get_text(separator=' ', strip=True) if content_type == 'html' else content
+                except Exception as e:
+                    logger.error(f"이메일 본문 파싱 실패: {e}")
                     body = content
-            except Exception as e:
-                logger.error(f"Failed to parse email body: {e}")
-                body = content
 
-            if redis_client:
-                if redis_client.sismember('processed_message_ids', message_id):
-                    logger.info(f"Message already processed: {message_id}")
-                    return None, None, None, None
-                redis_client.sadd('processed_message_ids', message_id)
-            else:
-                if message_id in processed_message_ids:
-                    logger.info(f"Message already processed: {message_id}")
-                    return None, None, None, None
-                processed_message_ids.add(message_id)
-
-            # ✅ Save email to DB
-            with SessionLocal() as db:
+                # 데이터베이스에 이메일 저장
                 if not db.query(OutlookEmail).filter_by(message_id=message_id).first():
                     email = OutlookEmail(
                         message_id=message_id,
-                        email_address=email_address,
+                        email_address=user_email,
                         subject=subject,
                         sender=sender,
                         body=body,
@@ -98,23 +78,17 @@ def get_outlook_email_details(
                     )
                     db.add(email)
                     db.commit()
-                    logger.info(f"Email saved to DB: {message_id}")
+                    logger.info(f"데이터베이스에 이메일 저장됨: {message_id}")
 
-            return subject, body, sender, fcm_token
+                return subject, body, sender, fcm_token
 
-        except requests.HTTPError as e:
-            logger.error(f"HTTP error (attempt {attempt + 1}): {e}")
-            if e.response.status_code == 401 and attempt < retries - 1:
-                try:
-                    outlook_auth.refresh_token(fcm_token)
-                except Exception as refresh_error:
-                    logger.error(f"Failed to refresh token: {refresh_error}")
-                    return None, None, None, None
-                continue
-            return None, None, None, None
-
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}")
-            return None, None, None, None
+            except requests.HTTPError as e:
+                logger.error(f"HTTP 오류 (시도 {attempt + 1}): {e}")
+                if e.response.status_code == 401 and attempt < retries - 1:
+                    continue  # get_valid_token이 이미 갱신 처리
+                return None, None, None, None
+            except Exception as e:
+                logger.error(f"예상치 못한 오류: {e}")
+                return None, None, None, None
 
     return None, None, None, None

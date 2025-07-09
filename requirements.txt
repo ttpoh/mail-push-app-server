@@ -1,0 +1,12 @@
+flask>=2.0.0
+gunicorn>=20.1.0
+gevent>=1.4
+firebase-admin>=6.0.0redis>=4.0.0
+google-cloud-secretmanager>=2.0.0
+sqlalchemy>=2.0.0
+dotenv>=2.0.0
+pymysql>=2.0.0
+msal>=2.0.0
+google-cloud-pubsub>=2.0.0
+pip install bs4>=2.0.0
+pip install jose>=2.0.0
