@@ -46,10 +46,16 @@ class OutlookAuth:
         return token.access_token
 
     def _ensure_valid_token(self, token: OutlookToken, db: Session) -> str:
+        logger.info(f"_ensure_valid_token: {token.access_token_exp}")
+
         if not token:
             raise RuntimeError("저장된 토큰이 없습니다")
-        if token.access_token_exp and datetime.utcnow() >= token.access_token_exp:
+        # access_token_exp가 없거나, 만료되었거나, 5분 이내 만료될 경우 토큰 갱신
+        if not token.access_token_exp or \
+            token.access_token_exp <= datetime.utcnow() + timedelta(minutes=1):
+            logger.info(f"_refresh_token in _ensure_valid_token")
             return self._refresh_token(token, db)
+        
         return token.access_token
 
     def get_valid_token(self, fcm_token: str) -> str:
@@ -81,7 +87,7 @@ class OutlookAuth:
 
     def watch(self, fcm_token: str, access_token: str, resource: str, change_type: str, notification_url: str, client_state: str):
         headers = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'}
-        expiration_time = datetime.now(timezone.utc) + timedelta(hours=24)
+        expiration_time = datetime.now(timezone.utc) + timedelta(minutes=1)
         expiration_str = expiration_time.replace(microsecond=0).isoformat().replace('+00:00', 'Z')
         body = {
             'changeType': change_type,
@@ -103,8 +109,8 @@ class OutlookAuth:
                 token.access_token = access_token
                 token.client_state = client_state
                 token.subscription_id = subscription_id
-                token.resource = resource
-                token.access_token_exp = datetime.utcnow() + timedelta(hours=1)
+                token.subscription_exp = datetime.utcnow() + timedelta(minutes=1)
+                token.access_token_exp = datetime.utcnow() + timedelta(minutes=1)
                 token.email_address = self.get_user_email(access_token)
                 db.merge(token)
                 db.commit()
@@ -116,6 +122,8 @@ class OutlookAuth:
             raise
 
     def renew_subscription(self, fcm_token: str, subscription_id: str):
+        logger.info(f"in renew_subscription: {subscription_id}")
+
         with SessionLocal() as db:
             token = db.query(OutlookToken).filter_by(fcm_token=fcm_token).first()
             if not token:
@@ -124,7 +132,7 @@ class OutlookAuth:
             
             access_token = self._ensure_valid_token(token, db)
             headers = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'}
-            expiration_time = datetime.now(timezone.utc) + timedelta(hours=24)
+            expiration_time = datetime.now(timezone.utc) + timedelta(minutes=1)
             expiration_str = expiration_time.replace(microsecond=0).isoformat().replace('+00:00', 'Z')
             body = {
                 'expirationDateTime': expiration_str

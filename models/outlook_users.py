@@ -12,7 +12,7 @@ class OutlookToken(Base):
     email_address = Column(String(255), nullable=False)
     client_state = Column(String(255), nullable=False, unique=True)  # 고유 제약 추가
     subscription_id = Column(String(255), nullable=True)
-    subscription_exp = Column(DateTime, nullable=True)  # 구독 만료 시간
+    subscription_exp = Column(DateTime, nullable=False)  # 구독 만료 시간
     access_token_exp = Column(DateTime, nullable=False)
     __table_args__ = (UniqueConstraint('client_state', name='unique_client_state'),)
 

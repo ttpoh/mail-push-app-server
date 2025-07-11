@@ -101,7 +101,7 @@ def update_tokens():
                     existing.access_token = access_token
                     existing.refresh_token = refresh_token
                     existing.email_address = email_address
-                    existing.access_token_exp = datetime.utcnow() + timedelta(hours=1)
+                    existing.access_token_exp = datetime.utcnow() + timedelta(minutes=1)
                 else:
                     # 존재하지 않으면 새로운 레코드 추가
                     logger.info(f"Inserting new token for email: {email_address}, client_state: {client_state}")
@@ -112,8 +112,8 @@ def update_tokens():
                         email_address=email_address,
                         client_state=client_state,
                         subscription_id=None,  # 👈 명시적으로 넣기
-                        subscription_exp=None,
-                        access_token_exp=datetime.utcnow() + timedelta(hours=1)
+                        subscription_exp=datetime.utcnow() + timedelta(minutes=1),
+                        access_token_exp=datetime.utcnow() + timedelta(minutes=1)
                     )
                     db.add(new_token)
 
@@ -156,22 +156,22 @@ def update_tokens():
                     issuer='https://appleid.apple.com'
                 )
 
-                sub = decoded.get('sub')
-                email_address = decoded.get('email') or f"{sub}@icloud.apple"
+                apple_sub = decoded.get('sub')
+                email_address = decoded.get('email') or f"{apple_sub}@icloud.apple"
 
                 with SessionLocal() as db:
-                    existing = db.query(ICloudToken).filter_by(sub=sub).first()
+                    existing = db.query(ICloudToken).filter_by(sub=apple_sub).first()
 
                     if existing:
-                        logger.info(f"Updating iCloudToken for sub: {sub}")
+                        logger.info(f"Updating iCloudToken for sub: {apple_sub}")
                         existing.email_address = email_address
                         existing.fcm_token = fcm_token
                         existing.access_token = access_token
                         existing.updated_at = datetime.utcnow()
                     else:
-                        logger.info(f"Inserting new iCloudToken for sub: {sub}")
+                        logger.info(f"Inserting new iCloudToken for sub: {apple_sub}")
                         new_token = ICloudToken(
-                            sub=sub,
+                            sub=apple_sub,
                             email_address=email_address,
                             fcm_token=fcm_token,
                             access_token=access_token,

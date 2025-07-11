@@ -31,9 +31,14 @@ class GmailAuth:
             client_secret=self.CLIENT_SECRET,
             scopes=self.SCOPES
         )
+        logger.info(f"creds.expired create in _get_credentials: {creds.expired}")
+        logger.info(f"creds.refresh_token create in _get_credentials: {creds.refresh_token}")
+
         if creds.expired and creds.refresh_token:
             new_token = self._manual_refresh(token.refresh_token)
             token.access_token = new_token
+            new_expiry = datetime.utcnow() + timedelta(hours=1)
+            token.expired_at = new_expiry
             self._save_token(token)
             creds = Credentials(
                 token=new_token,
@@ -43,6 +48,8 @@ class GmailAuth:
                 client_secret=self.CLIENT_SECRET,
                 scopes=self.SCOPES
             )
+        logger.info(f"creds create in _get_credentials: {creds}")
+
         return creds
 
     def _manual_refresh(self, refresh_token: str) -> str:
@@ -54,6 +61,8 @@ class GmailAuth:
         }
         r = requests.post('https://oauth2.googleapis.com/token', data=payload)
         r.raise_for_status()
+ 
+        logger.info(f"access_token in _manual_refresh{r.json()['access_token']}")
         return r.json()['access_token']
 
     def _save_token(self, token):
@@ -93,6 +102,7 @@ class GmailAuth:
                 existing_token.refresh_token = refresh_token
                 existing_token.email_address = email_address
                 existing_token.last_history_id = watch_response.get('historyId')
+                existing_token.expired_at = datetime.utcnow() + timedelta(hours=1)            
                 existing_token.updated_at = datetime.utcnow()
             else:
                 # 새 fcm_token이면 새 레코드 생성
@@ -103,6 +113,7 @@ class GmailAuth:
                     refresh_token=refresh_token,
                     email_address=email_address,
                     last_history_id=watch_response.get('historyId'),
+                    expired_at=datetime.utcnow() + timedelta(hours=1),
                     created_at=datetime.utcnow(),
                     updated_at=datetime.utcnow()
                 )

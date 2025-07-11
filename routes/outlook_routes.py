@@ -54,12 +54,12 @@ def outlook_webhook():
                 logger.info(f"이메일 처리 중: {email_address}")
 
                 # 만료 임박 시 구독 갱신
-                if main_token.access_token_exp and (main_token.access_token_exp - datetime.utcnow()).total_seconds() < 3600:
-                    try:
-                        outlook_auth.renew_subscription(main_token.fcm_token, main_token.subscription_id)
-                    except Exception as e:
-                        logger.error(f"fcm_token {main_token.fcm_token}에 대한 구독 갱신 실패: {e}")
-                        continue
+                # if main_token.access_token_exp and (main_token.access_token_exp - datetime.utcnow()).total_seconds() < 3600:
+                #     try:
+                #         outlook_auth.renew_subscription(main_token.fcm_token, main_token.subscription_id)
+                #     except Exception as e:
+                #         logger.error(f"fcm_token {main_token.fcm_token}에 대한 구독 갱신 실패: {e}")
+                #         continue
 
                 # 이메일 세부 정보 가져오기
                 subj, body, sender, _ = get_outlook_email_details(

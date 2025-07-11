@@ -176,8 +176,8 @@ def create_subscription():
                 email_address=email_address,
                 client_state=client_state,
                 subscription_id=subscription_id or None,  # 명시적 설정
-                # resource=resource,
-                access_token_exp=datetime.utcnow() + timedelta(hours=1),
+                subscription_exp=datetime.utcnow() + timedelta(minutes=1),
+                access_token_exp=datetime.utcnow() + timedelta(minutes=1),
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow()
             )
