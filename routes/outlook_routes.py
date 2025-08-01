@@ -30,7 +30,6 @@ def outlook_webhook():
 
     outlook_auth = OutlookAuth(
         client_id=request.headers.get('X-Outlook-Client-Id'),
-        client_secret=request.headers.get('X-Outlook-Client-Secret')
     )
 
     with SessionLocal() as db:

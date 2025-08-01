@@ -1,99 +1,120 @@
 from firebase_admin import messaging
 import json
+import logging
+from sqlalchemy.orm import joinedload
+
+from infra.db import SessionLocal
+from models.gmail_rules import MailRule, ConditionType, RuleCondition, ConditionKeyword
+
+logger = logging.getLogger(__name__)
+
 
 class FcmService:
-    def send_push(self, fcm_token: str, title: str, body: str, data: dict = None) -> str:
-        """
-        FCM 푸시 알림을 전송합니다.
-        '긴급' 키워드 -> siren.mp3 (critical),
-        '미팅' 키워드 -> 기본 사운드(default)
-        """
-        # 키워드 분기 (긴급/미팅)
-        if '긴급' in body:
-            critical_flag = True
-        elif '미팅' in body:
-            critical_flag = False
-        else:
-            print("푸시 스킵: '긴급' 또는 '미팅' 키워드 없음")
+    def send_push_for_email(self, fcm_token: str, email_address: str, subject: str, body: str, sender: str, extra_data: dict = None):
+        # 룰과 관계를 한 번에 가져와서 lazy load 실패 방지
+        with SessionLocal() as db:
+            rules = db.query(MailRule) \
+                .options(
+                    joinedload(MailRule.conditions).joinedload(RuleCondition.keywords)
+                ) \
+                .filter_by(owner_email=email_address, enabled=True) \
+                .all()
+
+        subject_lower = (subject or "").lower()
+        body_lower = (body or "").lower()
+        sender_lower = (sender or "").lower()
+
+        matched_rule = None
+        matched_keyword = None
+        for rule in rules:
+            for condition in rule.conditions:
+                for kw in condition.keywords:
+                    term = getattr(kw, 'keyword', '').lower()
+                    if condition.type == ConditionType.SUBJECT_CONTAINS and term in subject_lower:
+                        matched_rule = rule
+                        matched_keyword = term
+                        break
+                    if condition.type == ConditionType.BODY_CONTAINS and term in body_lower:
+                        matched_rule = rule
+                        matched_keyword = term
+                        break
+                    if condition.type == ConditionType.FROM_SENDER and term in sender_lower:
+                        matched_rule = rule
+                        matched_keyword = term
+                        break
+                if matched_rule:
+                    break
+            if matched_rule:
+                if matched_rule.stop_further_rules:
+                    break
+                else:
+                    break
+
+        if not matched_rule:
+            logger.info("No matching rule for %s subject='%s'", email_address, subject)
             return None
 
-        # 페이로드 데이터 준비
-        payload_data = {key: str(value) for key, value in (data.items() if data else {})}  # 모든 값을 문자열로 변환
-        mail_data = {'subject': title, 'body': body}
-        payload_data['mailData'] = json.dumps(mail_data, ensure_ascii=False)
-        payload_data['isCritical'] = 'true' if critical_flag else 'false'
-
-        # 메시지 기본 설정
-        message_kwargs = {
-            'notification': messaging.Notification(title=title, body=body),
-            'data': payload_data,
-            'token': fcm_token,
-        }
-
-        # APNSConfig 설정
-        if critical_flag:
-            sound_obj = messaging.CriticalSound(critical=True, name='siren.mp3', volume=0.2)
+        # 긴급 판단
+        critical = False
+        if matched_keyword and '긴급' in matched_keyword:
+            critical = True
+        elif matched_keyword and '미팅' in matched_keyword:
+            critical = False
         else:
-            sound_obj = 'default'
+            if '긴급' in subject_lower or '긴급' in body_lower:
+                critical = True
 
+        title = subject or "새 메일 도착"
+        body_text = body or ""
+
+        payload_data = {k: str(v) for k, v in (extra_data or {}).items()}
+        payload_data['mailData'] = json.dumps({'subject': title, 'body': body_text, 'sender': sender}, ensure_ascii=False)
+        payload_data['isCritical'] = 'true' if critical else 'false'
+        payload_data['matchedRule'] = matched_rule.name
+
+        # APNS 구성
+        aps_alert = messaging.ApsAlert(title=title, body=body_text)
+        sound = messaging.CriticalSound(critical=True, name='siren.mp3', volume=0.2) if critical else 'default'
         apns_cfg = messaging.APNSConfig(
             headers={'apns-priority': '10'},
             payload=messaging.APNSPayload(
-                aps=messaging.Aps(
-                    alert=messaging.ApsAlert(title=title, body=body),
-                    sound=sound_obj,
-                    content_available=True,
-                ),
+                aps=messaging.Aps(alert=aps_alert, sound=sound, content_available=True),
                 custom_data=payload_data
             )
         )
-        message_kwargs['apns'] = apns_cfg
 
-        # 메시지 생성 및 전송
-        message = messaging.Message(**message_kwargs)
-
-        # 디버그: 직렬화된 페이로드 출력
-        try:
-            print("Sending FCM message:")
-            print(json.dumps(self._serialize_message(message), indent=2, ensure_ascii=False))
-        except Exception as e:
-            print(f"직렬화 로깅 실패: {e}")
+        message = messaging.Message(
+            notification=messaging.Notification(title=title, body=body_text),
+            data=payload_data,
+            apns=apns_cfg,
+            token=fcm_token,
+        )
 
         try:
-            response = messaging.send(message)
-            print(f"푸시 전송 성공: {response}")
-            return response
+            logger.debug("FCM payload: %s", json.dumps(self._serialize_message(message), ensure_ascii=False))
+        except Exception:
+            pass
+
+        try:
+            resp = messaging.send(message)
+            logger.info("FCM sent to %s: %s", fcm_token, resp)
+            return resp
         except Exception as e:
-            print(f"푸시 전송 실패: {str(e)}")
+            logger.error("FCM send failed to %s: %s", fcm_token, e)
             raise
 
     def _serialize_message(self, message):
-        """
-        메시지를 직렬화 가능한 딕셔너리로 변환 (디버깅용)
-        """
-        return {
+        info = {
             'notification': {
-                'title': message.notification.title,
-                'body': message.notification.body
-            } if message.notification else None,
+                'title': message.notification.title if message.notification else None,
+                'body': message.notification.body if message.notification else None
+            },
             'data': message.data,
             'token': message.token,
-            'apns': {
-                'headers': message.apns.headers,
-                'payload': {
-                    'aps': {
-                        'alert': {
-                            'title': message.apns.payload.aps.alert.title,
-                            'body': message.apns.payload.aps.alert.body
-                        },
-                        'sound': {
-                            'critical': message.apns.payload.aps.sound.critical,
-                            'name': message.apns.payload.aps.sound.name,
-                            'volume': message.apns.payload.aps.sound.volume
-                        } if isinstance(message.apns.payload.aps.sound, messaging.CriticalSound) else message.apns.payload.aps.sound,
-                        'content-available': message.apns.payload.aps.content_available
-                    },
-                    'custom_data': message.apns.payload.custom_data
-                }
-            } if message.apns else None
         }
+        if message.apns:
+            info['apns'] = {
+                'headers': getattr(message.apns, 'headers', None),
+                'custom_data': getattr(message.apns.payload, 'custom_data', None)
+            }
+        return info

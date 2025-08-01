@@ -1,13 +1,39 @@
 from flask import Blueprint, request, jsonify
 from infra.db import SessionLocal
-from models.gmail_users import GmailToken  # FCM 토큰 저장 테이블
+from models.gmail_users import GmailToken
 import logging
 from google.oauth2 import service_account
 from google.cloud import pubsub_v1
 from google.api_core.exceptions import NotFound
+import requests
 
 logout_gmail_bp = Blueprint('logout_gmail', __name__)
 logger = logging.getLogger(__name__)
+
+def stop_gmail_watch(email_address: str, access_token: str):
+    """
+    Gmail API의 users.stop 엔드포인트를 호출하여 특정 사용자의 watch를 중지합니다.
+    
+    Args:
+        email_address (str): Gmail 사용자 이메일 주소 (예: puzzlista@gmail.com)
+        access_token (str): 유효한 액세스 토큰
+    """
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    url = f"https://www.googleapis.com/gmail/v1/users/{email_address}/stop"
+    
+    try:
+        response = requests.post(url, headers=headers, timeout=10)
+        if response.status_code == 204:
+            logger.info(f"Watch stopped successfully for {email_address}")
+        else:
+            logger.error(f"Failed to stop watch for {email_address}: {response.status_code} {response.text}")
+            raise Exception(f"Failed to stop watch: {response.text}")
+    except Exception as e:
+        logger.error(f"Error stopping watch for {email_address}: {e}")
+        raise
 
 @logout_gmail_bp.route('/api/logout_gmail', methods=['POST'])
 def logout_gmail():
@@ -25,7 +51,14 @@ def logout_gmail():
                 logger.info(f"No GmailToken entry found for fcm_token: {fcm_token}")
                 return jsonify({'status': 'ok', 'message': 'Token already removed'}), 200
 
-            # 👉 먼저 Pub/Sub 구독 삭제 처리
+            # Gmail watch 중지
+            if token_entry.email_address and token_entry.access_token:
+                try:
+                    stop_gmail_watch(token_entry.email_address, token_entry.access_token)
+                except Exception as e:
+                    logger.warning(f"Failed to stop Gmail watch for {token_entry.email_address}: {e}")
+
+            # Pub/Sub 구독 삭제 처리
             subscription_id = token_entry.subscription_id
             if subscription_id:
                 project_id = "mail-push-app-815d4"
@@ -43,7 +76,7 @@ def logout_gmail():
                 except Exception as e:
                     logger.error(f"❌ Failed to delete Pub/Sub subscription: {e}", exc_info=True)
 
-            # 👉 그 후 DB에서 GmailToken 삭제
+            # DB에서 GmailToken 삭제
             db.delete(token_entry)
             db.commit()
             logger.info(f"✅ Deleted GmailToken for fcm_token: {fcm_token}")

@@ -1,68 +1,94 @@
-from flask import Blueprint, request, jsonify
-from fcm.fcm_service import FcmService
-from utils.gmail_util import get_gmail_email_details
-from models.gmail_users import GmailToken
-from infra.db import SessionLocal
+from flask import Blueprint, request, jsonify, current_app
 import base64
 import json
 import logging
-from models.gmail_mail import GmailEmail
+from infra.db import SessionLocal
+from models.gmail_users import GmailToken
+from utils.gmail_util import get_gmail_email_details
+from fcm.fcm_service import FcmService
 
 logger = logging.getLogger(__name__)
 gmail_bp = Blueprint('gmail', __name__)
 fcm_service = FcmService()
-processed_history_ids = set()
+
+
+def _history_dedup_key(email_address: str, history_id: str):
+    return f"pubsub:history:{email_address}:{history_id}"
+
+
+def _message_push_dedup_key(message_id: str):
+    return f"pushed:message:{message_id}"
+
 
 @gmail_bp.route('/pubsub_endpoint', methods=['POST'])
 def pubsub_endpoint():
-    logger.info(f"Received Pub/Sub request: {request.get_json()}")
-    envelope = request.get_json() or {}
-    data_encoded = envelope.get('message', {}).get('data', '')
-
     try:
-        data = json.loads(base64.b64decode(data_encoded).decode())
-        logger.info(f"Decoded Pub/Sub data: {data}")
+        envelope = request.get_json() or {}
+        logger.info("Pub/Sub received: %s", envelope)
+
+        msg = envelope.get('message', {})
+        data_encoded = msg.get('data', '')
+        try:
+            data = json.loads(base64.b64decode(data_encoded).decode())
+        except Exception:
+            return jsonify({'error': 'invalid_payload'}), 400
 
         email_address = data.get('emailAddress')
         history_id = data.get('historyId')
         if not email_address or not history_id:
-            return jsonify({'error': 'Missing emailAddress or historyId'}), 400
+            return jsonify({'error': 'missing_fields'}), 400
 
-        # email_address에 해당하는 모든 fcm_token 조회
+        redis_client = getattr(current_app, 'extensions', {}).get('redis')
+
+        history_key = _history_dedup_key(email_address, history_id)
+        if redis_client and redis_client.get(history_key):
+            logger.info("Duplicate Pub/Sub (history) skip for %s %s", email_address, history_id)
+            # 계속 진행해서 message-level dedup로 한 번 더 확인할 수도 있음
+
         with SessionLocal() as db:
             tokens = db.query(GmailToken).filter_by(email_address=email_address).all()
             if not tokens:
-                logger.error(f"No Gmail tokens for email_address: {email_address}")
-                return jsonify({'error': f"No Gmail tokens for {email_address}"}), 404
+                return jsonify({'error': f'no_tokens_for_{email_address}'}), 404
 
-            # 이메일 세부 정보는 하나만 가져오면 됨 (모든 토큰에 동일 내용 푸시)
-            first_token = tokens[0].fcm_token
-            subject, body, sender = get_gmail_email_details(first_token, history_id)
-            logger.info(f"Email details: subject={subject}, sender={sender}")
-            if not subject or not body or not sender:
-                logger.info(f"No new Gmail message for history_id: {history_id}")
-                return jsonify({'status': 'no_new_message'}), 200
+        first_token = tokens[0].fcm_token
+        subject, body, sender, matched, message_id = get_gmail_email_details(
+            first_token, history_id, redis_client=redis_client
+        )
 
-            # 여러 FCM 토큰에 대해 푸시 전송
-            for token in tokens:
-                try:
-                    fcm_service.send_push(
-                        token.fcm_token,
-                        f"{sender} - {subject}",
-                        body[:200],
-                        data={
-                            'subject': subject,
-                            'body': body,
-                            'sender': sender,
-                            'messageId': history_id
-                        }
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to send push to token {token.fcm_token}: {e}")
+        if not subject or not matched or not message_id:
+            if redis_client:
+                redis_client.setex(history_key, 300, "1")
+            logger.info("No new or unmatched email for history_id %s", history_id)
+            return jsonify({'status': 'no_new_message_or_unmatched'}), 200
 
-            return jsonify({'status': 'gmail_pushed', 'tokens_notified': len(tokens)}), 200
+        # message-level dedup for push
+        push_key = _message_push_dedup_key(message_id)
+        if redis_client:
+            was_set = redis_client.set(push_key, "1", nx=True, ex=86400)  # atomic: 없으면 set
+            if not was_set:
+                logger.info("Already pushed message %s, skipping push", message_id)
+                return jsonify({'status': 'already_pushed'}), 200
+
+        notified = 0
+        for token_entry in tokens:
+            try:
+                fcm_service.send_push_for_email(
+                    token_entry.fcm_token,
+                    email_address,
+                    subject,
+                    body,
+                    sender,
+                    extra_data={'historyId': history_id, 'messageId': message_id}
+                )
+                notified += 1
+            except Exception as e:
+                logger.error("FCM send failure to %s: %s", token_entry.fcm_token, e)
+
+        if redis_client:
+            redis_client.setex(history_key, 3600, "1")
+
+        return jsonify({'status': 'gmail_processed', 'tokens_notified': notified}), 200
 
     except Exception as e:
-        logger.error(f"Failed to process Pub/Sub request: {str(e)}")
-        raise
-
+        logger.exception("Pub/Sub endpoint error: %s", e)
+        return jsonify({'error': 'internal'}), 500

@@ -4,6 +4,7 @@ import requests
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin
 from msal import ConfidentialClientApplication
+from msal import PublicClientApplication  # ConfidentialClientApplication 대신 PublicClientApplication 사용
 from sqlalchemy.orm import Session
 from infra.db import SessionLocal
 from models.outlook_users import OutlookToken
@@ -11,30 +12,39 @@ from models.outlook_users import OutlookToken
 logger = logging.getLogger(__name__)
 
 class OutlookAuth:
-    def __init__(self, client_id: str, client_secret: str, tenant: str = 'common', notify_url: str = 'https://mail-push.xtect.net/outlook_webhook'):
+    def __init__(self, client_id: str, tenant: str = 'common', notify_url: str = 'https://mail-push.xtect.net/outlook_webhook'):
         self.CLIENT_ID = client_id
-        self.CLIENT_SECRET = client_secret
+        # self.CLIENT_SECRET = client_secret
         self.AUTHORITY = f'https://login.microsoftonline.com/{tenant}'
-        self.SCOPES = ['User.Read', 'Mail.Read', 'offline_access']
-        self.REFRESH_SCOPES = ['User.Read', 'Mail.Read']  #
-        self.app = ConfidentialClientApplication(
+        self.SCOPES = ['User.Read', 'Mail.Read', 'Mail.ReadWrite', 'offline_access']
+        self.REFRESH_SCOPES = ['User.Read', 'Mail.Read', 'Mail.ReadWrite']  #
+        # self.app = ConfidentialClientApplication(
+        #     self.CLIENT_ID,
+        #     authority=self.AUTHORITY,
+        #     client_credential=self.CLIENT_SECRET
+        # )
+        self.app = PublicClientApplication(
             self.CLIENT_ID,
-            authority=self.AUTHORITY,
-            client_credential=self.CLIENT_SECRET
+            authority=self.AUTHORITY
+            # client_credential 제거 (공용 클라이언트에서는 client_secret 불필요)
         )
         self.notify_url = notify_url
 
     def _refresh_token(self, token: OutlookToken, db: Session) -> str:
         if not token.refresh_token:
+            logger.error(f"No refresh token for fcm_token: {token.fcm_token}")
             raise RuntimeError("리프레시 토큰이 없습니다")
         
+        logger.info(f"Attempting to refresh token for fcm_token: {token.fcm_token}")        
         result = self.app.acquire_token_by_refresh_token(
             token.refresh_token,
             scopes=self.REFRESH_SCOPES
         )
+        logger.info(f"result in _refresh_token : {result}")
+
         if 'access_token' not in result:
             error = result.get('error_description', '알 수 없는 오류')
-            logger.error(f"토큰 갱신 실패: {error}")
+            logger.error(f"토큰 갱신 실패 in access_token' not in result : {error}")
             raise RuntimeError(f"토큰 갱신 실패: {error}")
 
         token.access_token = result['access_token']
@@ -132,7 +142,7 @@ class OutlookAuth:
             
             access_token = self._ensure_valid_token(token, db)
             headers = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'}
-            expiration_time = datetime.now(timezone.utc) + timedelta(minutes=1)
+            expiration_time = datetime.now(timezone.utc) + timedelta(minutes=60)
             expiration_str = expiration_time.replace(microsecond=0).isoformat().replace('+00:00', 'Z')
             body = {
                 'expirationDateTime': expiration_str
@@ -156,5 +166,17 @@ class OutlookAuth:
                 db.commit()
                 logger.info(f"구독 {subscription_id} 갱신됨, fcm_token: {fcm_token}")
             except requests.HTTPError as e:
-                logger.error(f"구독 {subscription_id} 갱신 실패: {e}")
-                raise
+                if e.response.status_code == 404:
+                    logger.warning(f"구독 {subscription_id}이 존재하지 않음. 새 구독 생성 시도.")
+                    # 새 구독 생성
+                    self.watch(
+                        fcm_token=fcm_token,
+                        access_token=access_token,
+                        resource="me/mailFolders/inbox/messages",
+                        change_type="created,updated",
+                        notification_url=self.notify_url,
+                        client_state=token.client_state
+                    )
+                else:
+                    logger.error(f"구독 {subscription_id} 갱신 실패: {e}")
+                    raise

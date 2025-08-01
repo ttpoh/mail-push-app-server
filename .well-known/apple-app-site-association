@@ -1,0 +1,12 @@
+{
+    "applinks": {
+      "apps": [],
+      "details": [
+        {
+          "appID": "2TNUJB6F9A.com.secure.mailpushapp",
+          "paths": [ "/callback", "/callback/*" ]
+        }
+      ]
+    }
+  }
+  

@@ -84,6 +84,7 @@ def create_gmail_subscription():
                     email_address=email_address,
                     subscription_id=subscription_id,
                     created_at=datetime.utcnow(),
+                    expired_at=datetime.utcnow() + timedelta(hours=1),
                     updated_at=datetime.utcnow(),
                 )
                 db.add(new_record)
@@ -120,7 +121,7 @@ def create_subscription():
     try:
         outlook_auth = OutlookAuth(
             client_id=request.headers.get('X-Outlook-Client-Id'),
-            client_secret=request.headers.get('X-Outlook-Client-Secret')
+            # client_secret=request.headers.get('X-Outlook-Client-Secret')
         )
 
         # 3. Create or update token + subscription in one session

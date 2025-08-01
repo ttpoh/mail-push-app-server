@@ -2,6 +2,7 @@ from sqlalchemy import inspect
 from infra.db import Base, engine
 from models.gmail_users import GmailToken
 from models.gmail_mail import GmailEmail
+from models.gmail_rules import MailRule, RuleCondition, ConditionKeyword
 from models.outlook_users import OutlookToken
 from models.outlook_mail import OutlookEmail
 from models.icloud_users import ICloudToken
@@ -25,6 +26,14 @@ def initialize_database():
             print("gmail_users table created.")
         else:
             print("gmail_tokens table already exists.")
+        if 'gmail_rules' not in existing_tables:
+            print("Creating gmail_rules table...")
+            MailRule.__table__.create(bind=conn, checkfirst=True)
+            RuleCondition.__table__.create(bind=conn, checkfirst=True)
+            ConditionKeyword.__table__.create(bind=conn, checkfirst=True)
+            print("gmail_rules table created.")
+        else:
+            print("gmail_rules table already exists.")
         
         if 'gmail_emails' not in existing_tables:
             print("Creating gmail_emails table...")

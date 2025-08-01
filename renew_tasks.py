@@ -13,16 +13,20 @@ logger = logging.getLogger(__name__)
 def renew_outlook_subscriptions():
     # 환경 변수에서 OutlookAuth 설정 가져오기
     client_id = os.getenv('OUTLOOK_CLIENT_ID')
-    client_secret = os.getenv('OUTLOOK_CLIENT_SECRET')
-    tenant = os.getenv('OUTLOOK_TENANT', 'common')
+    tenant = os.getenv('OUTLOOK_TENANT')  # 기본값으로 'common' 설정
     notify_url = os.getenv('OUTLOOK_NOTIFY_URL', 'https://mail-push.xtect.net/outlook_webhook')
 
     # 환경 변수 유효성 검사
-    if not client_id or not client_secret:
-        logger.error("OUTLOOK_CLIENT_ID 또는 OUTLOOK_CLIENT_SECRET 환경 변수가 설정되지 않음")
+    if not client_id:
+        logger.error("OUTLOOK_CLIENT_ID 환경 변수가 설정되지 않음")
         return
 
-    outlook_auth = OutlookAuth(client_id, client_secret, tenant, notify_url)
+    logger.info(f"Using tenant: {tenant}, notify_url: {notify_url}")  # tenant 및 notify_url 로깅 추가
+    try:
+        outlook_auth = OutlookAuth(client_id, tenant=tenant, notify_url=notify_url)
+    except Exception as e:
+        logger.error(f"Failed to initialize OutlookAuth: {e}", exc_info=True)
+        return
     
     with SessionLocal() as db:
         # 활성 구독이 있는 모든 OutlookToken 레코드 가져오기
