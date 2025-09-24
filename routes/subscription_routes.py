@@ -19,7 +19,7 @@ def create_gmail_subscription():
     project_id = "mail-push-app-815d4"
     topic_id = "gmail-notifications"
     subscription_id = "gmail-subscription"
-    push_endpoint = "https://mail-push.xtect.net/pubsub_endpoint"
+    push_endpoint = "https://mail-push.xtect.net/api/pubsub_endpoint"
     service_account_file = "/home/ubuntu/mail-push-server-backup/mail-push-app-815d4-888b7cbde2f4.json"
 
     # 명시적으로 서비스 계정 credential 로드

@@ -10,6 +10,7 @@ from auth.logout_outlook import logout_outlook_bp
 from auth.logout_gmail import logout_gmail_bp
 from routes.mail_routes import email_bp
 from routes.rule_routes import rule_bp
+from routes.device_routes import device_bp
 from utils.logger import configure_logger
 from auth.gmail_auth import GmailAuth
 from fcm.fcm_service import FcmService
@@ -70,15 +71,18 @@ gmail_auth = GmailAuth()
 fcm_service = FcmService()
 
 # --- 라우트 등록 ---
-app.register_blueprint(token_bp)
+app.url_map.strict_slashes = False  # 슬래시 유연 처리 (권장)
+
+app.register_blueprint(token_bp, url_prefix="/api")
 app.register_blueprint(subscription_gmail_bp)
 app.register_blueprint(subscription_bp)
-app.register_blueprint(gmail_bp)
+app.register_blueprint(gmail_bp, url_prefix="/api")
 app.register_blueprint(outlook_bp)
 app.register_blueprint(logout_outlook_bp)
 app.register_blueprint(logout_gmail_bp)
 app.register_blueprint(email_bp)
-app.register_blueprint(rule_bp)
+app.register_blueprint(rule_bp, url_prefix="/api/rules")
+app.register_blueprint(device_bp, url_prefix="/api")
 
 
 # --- ACME 인증용 파일 라우팅 ---

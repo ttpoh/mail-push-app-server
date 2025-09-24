@@ -6,6 +6,8 @@ from models.gmail_rules import MailRule, RuleCondition, ConditionKeyword
 from models.outlook_users import OutlookToken
 from models.outlook_mail import OutlookEmail
 from models.icloud_users import ICloudToken
+from models.alarm_setting import AlarmSettings
+from models.push_dedupe import PushDedupe
 
 def initialize_database():
     print("Checking and creating tables if needed...")
@@ -55,5 +57,19 @@ def initialize_database():
             print("outlook_emails table created.")
         else:
             print("outlook_emails table already exists.")
+
+        if 'alarm_setting' not in existing_tables:
+            print("Creating alarm_setting table...")
+            AlarmSettings.__table__.create(bind=conn, checkfirst=True)
+            print("alarm_setting table created.")
+        else:
+            print("alarm_setting table already exists.")
+
+        if 'push_dedupe' not in existing_tables:
+            print("Creating push_dedupe table...")
+            PushDedupe.__table__.create(bind=conn, checkfirst=True)
+            print("push_dedupe table created.")
+        else:
+            print("push_dedupe table already exists.")
 
     print("Database initialization complete.")

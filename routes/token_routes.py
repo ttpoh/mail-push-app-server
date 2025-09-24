@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 logger = logging.getLogger(__name__)
 
 token_bp = Blueprint('token', __name__)
+
 gmail_auth = GmailAuth()
 
 
@@ -46,7 +47,7 @@ def validate_token():
 
     return jsonify({'error': 'Unsupported service'}), 400
 
-@token_bp.route('/api/update_tokens', methods=['POST'])
+@token_bp.route('/update_tokens', methods=['POST'])
 def update_tokens():
     data = request.get_json() or {}
     logger.info(f"Received update_tokens request: {data}")

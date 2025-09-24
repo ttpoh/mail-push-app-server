@@ -3,16 +3,23 @@ from requests import Session
 import logging
 from models.gmail_rules import MailRule, RuleCondition, ConditionKeyword
 from models.gmail_users import GmailToken  # fallback용
+from models.outlook_users import OutlookToken  # fallback용
+
 from infra.db import SessionLocal
 
-rule_bp = Blueprint("rules", __name__, url_prefix="/rules")
+rule_bp = Blueprint("rules", __name__)
 
 def get_current_email_fallback_from_fcm():
     fcm_token = request.args.get("fcm_token") or (request.get_json(silent=True) or {}).get("fcm_token")
+    logging.info(f"fcm_token In get_current_email_fallback_from_fcm: {fcm_token}")
+
     if not fcm_token:
         return None
     with SessionLocal() as db:
         entry = db.query(GmailToken).filter_by(fcm_token=fcm_token).first()
+        if entry:
+            return entry.email_address
+        entry = db.query(OutlookToken).filter_by(fcm_token=fcm_token).first()
         if entry:
             return entry.email_address
     return None
@@ -23,11 +30,18 @@ def get_current_email():
 
     if email:
         return email
-    return get_current_email_fallback_from_fcm()
+    fb = get_current_email_fallback_from_fcm()
+    if fb:
+        logging.info(f"Fallback email from fcm_token: {fb}")
+    else:
+        logging.info("Fallback failed: no fcm_token or no matching GmailToken entry.")
+    return fb
 
-@rule_bp.route("", methods=["GET"])
+@rule_bp.route("/", methods=["GET"])
 def list_rules():
     owner = get_current_email()
+    logging.info(f"owner In list_rules: {owner}")
+
     if not owner:
         return jsonify({"error": "unauthenticated"}), 401
     with SessionLocal() as db:
@@ -41,13 +55,15 @@ def list_rules():
                 "conditions": [
                     {
                         "id": c.id,
-                        "type": c.type,
+                        "type": c.type.value,
                         "position": c.position,
                         "keywords": [k.keyword for k in c.keywords],
                     }
                     for c in sorted(rule.conditions, key=lambda x: x.position)
                 ],
             }
+        logging.info(f"rules In list_rules: {rules}")
+
         return jsonify([serialize(r) for r in rules])
 # create/update/delete 동일하게 owner 얻는 부분만 위 get_current_email() 사용
 
@@ -112,7 +128,11 @@ def update_rule(rule_id):
 
 @rule_bp.route("/<int:rule_id>", methods=["DELETE"])
 def delete_rule(rule_id):
+    logging.info(f"rule_id In delete_rule: {rule_id}")
+
     owner = get_current_email()
+    logging.info(f"owner In delete_rule: {owner}")
+
     if not owner:
         return jsonify({"error": "unauthenticated"}), 401
     db: Session = SessionLocal()

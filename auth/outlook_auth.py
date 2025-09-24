@@ -97,7 +97,7 @@ class OutlookAuth:
 
     def watch(self, fcm_token: str, access_token: str, resource: str, change_type: str, notification_url: str, client_state: str):
         headers = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'}
-        expiration_time = datetime.now(timezone.utc) + timedelta(minutes=1)
+        expiration_time = datetime.now(timezone.utc) + timedelta(minutes=60)
         expiration_str = expiration_time.replace(microsecond=0).isoformat().replace('+00:00', 'Z')
         body = {
             'changeType': change_type,
