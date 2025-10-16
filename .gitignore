@@ -18,7 +18,7 @@ GoogleService-Info.json
 .env.local
 .env.*.localfcm-credentials.json
 fcm-credentials.json
-mail-push-app-815d4-888b7cbde2f4.json
+etc/mailpush/service-account.json
 
 __pycache__/
 *.py[cod]
