@@ -89,8 +89,9 @@ def _serialize_rule(rule: MailRule) -> dict:
         "id": rule.id,
         "name": rule.name,
         "enabled": rule.enabled,
-        # "stop_further_rules": rule.stop_further_rules,  # ✅ 제거
-        "alarm": (rule.alarm.value if rule.alarm else "normal"),  # ✅ 추가
+        "alarm": (rule.alarm.value if rule.alarm else "normal"),  # ✅ 알람 유지
+        "sound": rule.sound,  # ✅ 추가
+        "tts": rule.tts,      # ✅ 추가
         "conditions": [_serialize_condition(c) for c in sorted(rule.conditions, key=lambda x: x.position)],
     }
 
@@ -130,9 +131,10 @@ def create_rule():
         return jsonify({"error": "invalid payload: name required"}), 400
 
     enabled = bool(payload.get("enabled", True))
-    # stop_further = bool(payload.get("stop_further_rules", False))  # ✅ 제거
-    alarm = _parse_alarm(payload.get("alarm"))  # ✅ 추가
+    alarm = _parse_alarm(payload.get("alarm"))  # ✅ 유지
     conditions = payload.get("conditions", []) or []
+    sound = payload.get("sound")   # ✅ 추가
+    tts = payload.get("tts")       # ✅ 추가
 
     try:
         with SessionLocal() as db:
@@ -140,10 +142,12 @@ def create_rule():
                 owner_email=owner,
                 name=name,
                 enabled=enabled,
-                alarm=alarm,  # ✅
+                alarm=alarm,
+                sound=sound,   # ✅ 저장
+                tts=tts        # ✅ 저장
             )
             db.add(rule)
-            db.flush()  # rule.id 확보
+            db.flush()
 
             for idx, cond in enumerate(conditions):
                 ctype = _parse_condition_type(cond.get("type", "subjectContains"))
@@ -196,11 +200,14 @@ def update_rule(rule_id):
             if "enabled" in payload:
                 rule.enabled = bool(payload.get("enabled"))
 
-            # if "stop_further_rules" in payload:  # ✅ 제거
-            #     rule.stop_further_rules = bool(payload.get("stop_further_rules"))
-
-            if "alarm" in payload:  # ✅ 추가
+            if "alarm" in payload:
                 rule.alarm = _parse_alarm(payload.get("alarm"))
+
+            # ✅ 여기 추가: sound, tts 수정
+            if "sound" in payload:
+                rule.sound = payload.get("sound")
+            if "tts" in payload:
+                rule.tts = payload.get("tts")
 
             # 조건 전체 재구성
             for c in list(rule.conditions):

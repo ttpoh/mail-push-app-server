@@ -36,7 +36,8 @@ def _compact(s: str) -> str:
 def _compute_rules_version(rules: list[MailRule]) -> str:
     serial = []
     for r in sorted(rules, key=lambda x: (x.id or 0, x.name or "")):
-        if not r.enabled: continue
+        if not r.enabled:
+            continue
         conds = []
         for c in sorted(r.conditions, key=lambda x: x.position):
             conds.append({
@@ -53,6 +54,32 @@ def _compute_rules_version(rules: list[MailRule]) -> str:
     blob = json.dumps(serial, ensure_ascii=False, sort_keys=True)
     digest = hashlib.sha1(blob.encode("utf-8")).hexdigest()
     return digest[:10]
+
+def _as_alarm_level(val) -> AlarmLevel:
+    """입력 어떤 형태든 AlarmLevel로 안전 변환."""
+    if isinstance(val, AlarmLevel):
+        return val
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in ("normal", "critical", "until"):
+            return AlarmLevel(s)
+    v = getattr(val, "value", None)
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("normal", "critical", "until"):
+            return AlarmLevel(s)
+    return AlarmLevel.NORMAL
+
+# === 규칙 사운드 파일명 결정( iOS APNs 배너용 ) ===
+def _sound_filename(base: str) -> str:
+    """
+    규칙 사운드 이름에서 확장자를 붙여 APNs에 전달할 파일명 반환.
+    - base가 'default'거나 빈 값이면 'default' 반환(시스템 기본음)
+    - 그렇지 않으면 '<base>.caf' 반환 (앱 번들에 포함되어 있어야 함)
+    """
+    if not base or base == "default":
+        return "default"
+    return f"{base}.caf"
 
 class FcmService:
     def _mark_sent_once(self, db, email_address: str, push_key: str, fcm_token: str) -> bool:
@@ -202,8 +229,8 @@ class FcmService:
         def _cond_match(cond) -> bool:
             kw_list = [(getattr(kw, "keyword", "") or "").lower().strip() for kw in cond.keywords]
             kw_list = [k for k in kw_list if k]
-            if not kw_list: return False
-
+            if not kw_list:
+                return False  # 키워드가 하나도 없으면 매칭 실패로 간주
             def hit(one_kw: str) -> bool:
                 kw_norm, kw_compact = one_kw, _compact(one_kw)
                 if cond.type == ConditionType.SUBJECT_CONTAINS:
@@ -215,48 +242,69 @@ class FcmService:
                 if cond.type == ConditionType.FROM_SENDER:
                     return (kw_norm in sender_norm) or (kw_compact in sender_compact)
                 return False
-
             logic_val = getattr(cond, "logic", None)
             logic = (logic_val.value if isinstance(logic_val, LogicType) else str(logic_val or "or")).lower()
             return all(hit(w) for w in kw_list) if logic == "and" else any(hit(w) for w in kw_list)
 
+        # 규칙 덤프 로깅(문제 추적용)
+        try:
+            for r in rules:
+                alarm_dbg = _as_alarm_level(getattr(r, "alarm", AlarmLevel.NORMAL)).value
+                cond_cnt = len(getattr(r, "conditions", []) or [])
+                kw_dbg = []
+                for c in (r.conditions or []):
+                    kw_dbg.extend([k.keyword for k in (c.keywords or []) if getattr(k, "keyword", None)])
+                logger.info("RULE DUMP: id=%s name=%s alarm=%s conds=%d keywords=%s",
+                            getattr(r, "id", None), getattr(r, "name", None),
+                            alarm_dbg, cond_cnt, ",".join(kw_dbg[:10]))
+        except Exception as _e:
+            logger.warning("RULE DUMP failed: %s", _e)
+
+        # ✅ 조건 없는 규칙은 매칭 제외
         matched_rule = None
         for rule in rules:
-            if all(_cond_match(cond) for cond in rule.conditions):
+            conds = getattr(rule, "conditions", []) or []
+            if not conds:
+                continue
+            if all(_cond_match(cond) for cond in conds):
                 matched_rule = rule
                 break
+
         if not matched_rule:
             logger.info("RULE MISS: %s / %s", email_address, raw_subject)
             return None
 
+        # 매칭 규칙 및 알람 레벨 로깅
+        logger.info(
+            "RULE HIT: id=%s name=%s raw_alarm=%r type=%s",
+            getattr(matched_rule, "id", None),
+            getattr(matched_rule, "name", None),
+            getattr(matched_rule, "alarm", None),
+            type(getattr(matched_rule, "alarm", None)).__name__,
+        )
+
         with SessionLocal() as db:
             settings = db.query(AlarmSettings).filter(AlarmSettings.fcm_token == fcm_token).first()
 
-        normal_on_global = bool(getattr(settings, "normal_on", True)) if settings else True
-        critical_on_global = bool(getattr(settings, "critical_on", False)) if settings else False
-
-        rule_alarm = getattr(matched_rule, "alarm", AlarmLevel.NORMAL)
-        if isinstance(rule_alarm, str):
-            try: rule_alarm = AlarmLevel(rule_alarm)
-            except Exception: rule_alarm = AlarmLevel.NORMAL
-
-        if rule_alarm == AlarmLevel.UNTIL:
-            desired_critical, desired_until = True, True
-        elif rule_alarm == AlarmLevel.CRITICAL:
-            desired_critical, desired_until = True, False
-        else:
-            desired_critical, desired_until = False, False
-
-        if not critical_on_global:
-            desired_critical, desired_until = False, False
-        if not desired_critical and not normal_on_global:
-            logger.info("All alerts disabled by global setting. Skip.")
+        # ✅ 전역 스위치는 normal_on만 사용 (켜짐/꺼짐)
+        global_on = bool(getattr(settings, "normal_on", True)) if settings else True
+        if not global_on:
+            logger.info("Global alarm OFF → skip all pushes")
             return None
 
-        effective_alarm = AlarmLevel.UNTIL if desired_critical and desired_until \
-                          else (AlarmLevel.CRITICAL if desired_critical else AlarmLevel.NORMAL)
-        final_critical = (effective_alarm != AlarmLevel.NORMAL)
-        final_until    = (effective_alarm == AlarmLevel.UNTIL)
+        # ✅ 규칙 알람만으로 최종 의도 결정
+        rule_alarm = _as_alarm_level(getattr(matched_rule, "alarm", AlarmLevel.NORMAL))
+        rule_sound = (getattr(matched_rule, "sound", None) or "default").strip()  # ← 규칙 사운드
+
+        if rule_alarm == AlarmLevel.UNTIL:
+            final_critical, final_until = True, True
+            effective_alarm = AlarmLevel.UNTIL
+        elif rule_alarm == AlarmLevel.CRITICAL:
+            final_critical, final_until = True, False
+            effective_alarm = AlarmLevel.CRITICAL
+        else:
+            final_critical, final_until = False, False
+            effective_alarm = AlarmLevel.NORMAL
 
         title = raw_subject or "New mail"
         body_text = raw_body or ""
@@ -289,12 +337,14 @@ class FcmService:
             "isCritical": "true" if final_critical else "false",
             "criticalUntil": "true" if final_until else "false",
             "emailAddress": email_address,
+            "sound": rule_sound,           # ✅ 규칙 사운드 항상 포함
+            "tts": (getattr(matched_rule, "tts", None) or "").strip(),  # ✅ 규칙 TTS 문구
         }
 
         # (1) BG (사일런트) - 네이티브에서 루프 처리
         payload_data_bg = { **base_data, "pushChannel": "bg" }
         bg_headers = {"apns-push-type": "background", "apns-priority": "5"}
-        bg_aps = messaging.Aps(content_available=True)
+        bg_aps = messaging.Aps(content_available=True)  # ✅ BG는 content_available 필수
         bg_cfg = messaging.APNSConfig(
             headers=bg_headers,
             payload=messaging.APNSPayload(aps=bg_aps, custom_data=payload_data_bg),
@@ -325,18 +375,33 @@ class FcmService:
         if bg_send_success:
             time.sleep(1.2)
 
-        # (2) ALERT - 포그라운드/배너 처리 (필수)
-        # ✅ top-level notification 복원 (iOS/Android 배너 안정성 향상)
+        # (2) ALERT - 포그라운드/배너 처리
         payload_data_alert = { **base_data, "pushChannel": "alert" }
         alert_headers = {"apns-push-type": "alert", "apns-priority": "10"}
-        if final_until:
-            apns_sound = None   # until은 네이티브 루프 담당
-        elif final_critical:
-            apns_sound = messaging.CriticalSound(critical=True, name="siren.caf", volume=1.0)
-        else:
-            apns_sound = "default"
 
-        # ✅ alert에서 content_available 제거 (BG용만 사용)
+        # iOS APNs 배너 사운드: 규칙 사운드 우선 적용
+        if final_until:
+            apns_sound = None
+            if not bg_send_success:
+                name = _sound_filename(rule_sound)
+                apns_sound = messaging.CriticalSound(
+                    critical=True,
+                    name=(name if name != "default" else "siren.caf"),
+                    volume=0.5
+                )
+                payload_data_alert["fallbackLoop"] = "true"
+        elif final_critical:
+            name = _sound_filename(rule_sound)
+            apns_sound = messaging.CriticalSound(
+                critical=True,
+                name=(name if name != "default" else "siren.caf"),
+                volume=0.5
+            )
+        else:
+            name = _sound_filename(rule_sound)
+            apns_sound = (name if name != "default" else "default")
+
+        # ✅ ALERT에도 content_available 유지
         alert_aps = messaging.Aps(
             alert=messaging.ApsAlert(title=title, body=body_text),
             sound=apns_sound,
@@ -348,12 +413,12 @@ class FcmService:
         )
         
         alert_send_success = False
+        resp_alert = None
         with SessionLocal() as db:
             if not self._mark_sent_once(db, email_address, base_push_key + ":alert", fcm_token):
                 logger.info("Skip duplicate (alert) %s", base_push_key)
             else:
                 try:
-                    # ✅ iOS/Android 모두 배너로 분류되도록 top-level notification 추가
                     resp_alert = messaging.send(messaging.Message(
                         data=payload_data_alert,
                         notification=messaging.Notification(title=title, body=body_text),

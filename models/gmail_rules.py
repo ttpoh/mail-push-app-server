@@ -31,11 +31,8 @@ class MailRule(Base):
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     name = Column(String(255), nullable=False)
-    owner_email = Column(String(255), nullable=False)
+    owner_email = Column(String(255), nullable=False, index=True)
     enabled = Column(Boolean, default=True, nullable=False)
-
-    # ✅ stop_further_rules 제거
-    # stop_further_rules = Column(Boolean, default=False, nullable=False)
 
     # ✅ 규칙별 알람 모드
     alarm = Column(
@@ -43,6 +40,14 @@ class MailRule(Base):
         nullable=False,
         default=AlarmLevel.NORMAL
     )
+
+    # ✅ 추가: 알람 사운드(에셋 경로 또는 식별자). 예: 'assets/sounds/siren.mp3' 또는 'default'
+    #    - 기존 데이터 호환을 위해 nullable 허용
+    sound = Column(String(512), nullable=True)
+
+    # ✅ 추가: TTS 메시지(사용자 입력)
+    #    - 길이가 길 수 있으므로 1024까지 여유를 둠(필요하면 Text로 변경 가능)
+    tts = Column(String(1024), nullable=True)
 
     # position 순 정렬로 children 정렬(선택)
     conditions = relationship(
